@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -12,12 +13,12 @@ OWNER_ID = 7020448136
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Bazani xotirada saqlash uchun vaqtinchalik tuzilmalar (Keyinchalik SQL ulasa bo'ladi)
+# Bazani xotirada saqlash uchun tuzilma
 db = {
     "users": {OWNER_ID: {"balance": 0}},
     "admins": {OWNER_ID},
     "balance_admins": {OWNER_ID},
-    "channels": [],       # Majburiy obuna kanallari: [{"id": ..., "url": ..., "title": ...}]
+    "channels": [],       # Majburiy obuna kanallari
     "req_channels": [],   # So'rovli obuna kanallari
     "promos": {
         "42": [],
@@ -29,7 +30,6 @@ db = {
 
 # --- OBUNANI TEKSHIRISH ---
 async def check_subscriptions(user_id: int) -> bool:
-    # Majburiy va so'rovli obunalarni tekshirish mantiqi
     for ch in db["channels"]:
         try:
             member = await bot.get_chat_member(chat_id=ch["id"], user_id=user_id)
@@ -132,9 +132,8 @@ async def finish_purchase(callback: types.CallbackQuery):
         await callback.answer("❌ Afsuski, bu turdagi promokodlar hozircha qolmagan!", show_alert=True)
         return
         
-    # Balansdan yechish va promokod berish
     db["users"][user_id]["balance"] -= price
-    promo_code = db["promos"][code_type].pop(0) # 1 ta odamga berilib, bazadan o'chiriladi
+    promo_code = db["promos"][code_type].pop(0) # 1 ta odamga berilib bazadan o'chiriladi
     
     await callback.message.delete()
     await callback.message.answer(f"🎉 **Tabriklaymiz! Xarid muvaffaqiyatli amalga oshirildi.**\n\nSizning promokodingiz:\n`{promo_code}`", parse_mode="Markdown")
@@ -176,19 +175,7 @@ async def stats(message: types.Message):
     total_users = len(db["users"])
     await message.answer(f"📊 **Bot statistikasi:**\n\n👥 Foydalanuvchilar soni: {total_users} ta", parse_mode="Markdown")
 
-@dp.message(F.text == "➕ Promokod qo'shish")
-async def add_promo_start(message: types.Message):
-    if message.from_user.id not in db["admins"]:
-        return
-    keyboard = [
-        [InlineKeyboardButton(text="42", callback_data="add_p_42"), InlineKeyboardButton(text="79", callback_data="add_p_79")],
-        [InlineKeyboardButton(text="99", callback_data="add_p_99"), InlineKeyboardButton(text="299", callback_data="add_p_299")]
-    ]
-    await message.answer("Qaysi turdagi promokod qo'shmoqchisiz?", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
-
-# (Admin qo'shish, kanal qo'shish va promokod matnini qabul qilish qismlarini FSM yoki oddiy holatda kengaytirib olasiz)
-
-# --- 5 DAQIQADAN UYG'OTIB TURUVCHI WEB SERVER (RENDER / HOSTING UCHUN) ---
+# --- RENDER KEEP-ALIVE SERVERI ---
 async def handle(request):
     return web.Response(text="Bot ishlayapti!")
 
@@ -197,16 +184,16 @@ async def start_web_server():
     app.router.add_get("/", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# --- ASOSIY RUNNER ---
+# --- RUNNER ---
 async def main():
-    # Keep-alive veb serverini ishga tushirish
+    logging.basicConfig(level=logging.INFO)
     asyncio.create_task(start_web_server())
-    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
