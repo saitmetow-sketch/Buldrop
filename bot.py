@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 
 # --- ASOSIY SOZLAMALAR ---
-TOKEN = "8644696840:AAE1J15_4gsDcEkzDExqOARCo38V5o3Nylo"
+TOKEN = "8644696840:AAGMNi0SgF27zbuJDvYM6Y6HsAIFV2GaaCk"
 OWNER_ID = 7020448136  # FAQAT SIZNING ID RAQAMINGIZ
 
 bot = Bot(token=TOKEN)
