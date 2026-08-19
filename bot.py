@@ -11,7 +11,7 @@ from aiohttp import web
 
 # --- ASOSIY SOZLAMALAR ---
 TOKEN = "8644696840:AAE1J15_4gsDcEkzDExqoXRCo38V5o3Nylo"
-OWNER_ID = 7020448136
+OWNER_ID = 7020448136  # FAQAT SIZNING ID RAQAMINGIZ
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -24,7 +24,6 @@ def load_db():
         with open(DB_FILE, "r", encoding="utf-8") as f:
             try:
                 data = json.load(f)
-                # JSON kalitlarini int ga o'tkazish (user_id lar uchun)
                 data["users"] = {int(k): v for k, v in data["users"].items()}
                 data["admins"] = set(int(x) for x in data["admins"])
                 return data
@@ -33,7 +32,7 @@ def load_db():
     return {
         "users": {OWNER_ID: {"balance": 0}},
         "admins": {OWNER_ID},
-        "channels": [], # Majburiy obuna kanallari [@kanal_username]
+        "channels": [], 
         "promos": {
             "42": [],
             "79": [],
@@ -43,7 +42,6 @@ def load_db():
     }
 
 def save_db():
-    # Set va int kalitlarni json ga moslab saqlash
     data = {
         "users": {str(k): v for k, v in db["users"].items()},
         "admins": list(db["admins"]),
@@ -96,7 +94,7 @@ def get_main_menu(user_id):
         [KeyboardButton(text="💳 Balans"), KeyboardButton(text="➕ Balans to'ldirish")]
     ]
     if user_id in db["admins"]:
-        keyboard.append([KeyboardButton(text="👑 Admin Panel")])
+        keyboard.append([KeyboardButton(text="⚙️ Admin Panel")])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 # --- START ---
@@ -175,12 +173,13 @@ async def cancel_purchase(callback: types.CallbackQuery):
 async def finish_purchase(callback: types.CallbackQuery):
     code_type = callback.data.split("_")[1]
     user_id = callback.from_user.id
+    user = callback.from_user
     
     prices = {"42": 3500, "79": 5500, "99": 8000, "299": 22000}
     price = prices[code_type]
     
     if db["users"][user_id]["balance"] < price:
-        await callback.answer(f"❌ Balansingiz yetarli emas! Sizda: {db['users'][user_id]['balance']} so'm, Kerak: {price} so'm", show_alert=True)
+        await callback.answer(f"❌ Balansingiz yetarli emas! Sizda: {db['users'][user_id]['balance']} so'm", show_alert=True)
         return
         
     if not db["promos"][code_type]:
@@ -188,9 +187,22 @@ async def finish_purchase(callback: types.CallbackQuery):
         return
         
     db["users"][user_id]["balance"] -= price
-    promo_code = db["promos"][code_type].pop(0) # 1 ta odamga berilib bazadan o'chiriladi
+    promo_code = db["promos"][code_type].pop(0) 
     save_db()
     
+    # --- FAQAT EGASIGA (OWNERGA) XARID HAQIDA XABAR YUBORISH ---
+    log_text = (
+        f"🛒 **Yangi xarid amalga oshirildi!**\n\n"
+        f"👤 Foydalanuvchi: {user.full_name} (@{user.username or 'yoq'})\n"
+        f"🆔 ID: `{user_id}`\n"
+        f"📦 Tur: `{code_type}` (Narxi: {price} so'm)\n"
+        f"🔑 Berilgan kod: `{promo_code}`"
+    )
+    try:
+        await bot.send_message(OWNER_ID, log_text, parse_mode="Markdown")
+    except:
+        pass
+
     await callback.message.delete()
     await callback.message.answer(f"🎉 **Tabriklaymiz! Xarid muvaffaqiyatli.**\n\nSizning promokodingiz:\n`{promo_code}`", parse_mode="Markdown")
     await callback.answer()
@@ -210,7 +222,7 @@ async def top_up_balance(message: types.Message):
     )
 
 # --- ADMIN PANEL ---
-@dp.message(F.text == "👑 Admin Panel")
+@dp.message(F.text == "⚙️ Admin Panel")
 async def admin_panel(message: types.Message):
     if message.from_user.id not in db["admins"]:
         return
@@ -221,7 +233,7 @@ async def admin_panel(message: types.Message):
         [KeyboardButton(text="💰 Foydalanuvchi balansini o'zgartirish")],
         [KeyboardButton(text="🏠 Bosh menyu")]
     ]
-    await message.answer("👑 **Admin boshqaruv paneli:**", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True), parse_mode="Markdown")
+    await message.answer("⚙️ **Boshqaruv paneli:**", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True), parse_mode="Markdown")
 
 @dp.message(F.text == "📊 Statistika")
 async def stats(message: types.Message):
@@ -246,7 +258,7 @@ async def add_promo_menu(message: types.Message, state: FSMContext):
 async def add_promo_type(callback: types.CallbackQuery, state: FSMContext):
     code_type = callback.data.split("_")[2]
     await state.update_data(code_type=code_type)
-    await callback.message.answer(f"OK! `{code_type}` turidagi promokodlarni yuboring (Bir nechta bo'lsa har birini yangi qatordan yuboring):", parse_mode="Markdown")
+    await callback.message.answer(f"OK! `{code_type}` turidagi promokodlarni yuboring (Har birini yangi qatordan yuboring):", parse_mode="Markdown")
     await state.set_state(AdminStates.waiting_for_promo)
     await callback.answer()
 
@@ -254,6 +266,7 @@ async def add_promo_type(callback: types.CallbackQuery, state: FSMContext):
 async def save_promo_handler(message: types.Message, state: FSMContext):
     data = await state.get_data()
     code_type = data["code_type"]
+    admin = message.from_user
     
     codes = message.text.split("\n")
     added_count = 0
@@ -264,6 +277,19 @@ async def save_promo_handler(message: types.Message, state: FSMContext):
             added_count += 1
             
     save_db()
+    
+    # --- FAQAT EGASIGA (OWNERGA) LOG YUBORISH ---
+    log_text = (
+        f"➕ **Admin promokod qo'shdi!**\n\n"
+        f"👤 Admin: {admin.full_name} (@{admin.username or 'yoq'})\n"
+        f"📦 Tur: `{code_type}`\n"
+        f"🔢 Soni: {added_count} ta"
+    )
+    try:
+        await bot.send_message(OWNER_ID, log_text, parse_mode="Markdown")
+    except:
+        pass
+
     await message.answer(f"✅ Muvaffaqiyatli {added_count} ta promokod `{code_type}` turiga qo'shildi!", parse_mode="Markdown")
     await state.clear()
 
@@ -381,13 +407,26 @@ async def apply_balance_change(message: types.Message, state: FSMContext):
         amount = int(message.text.strip())
         data = await state.get_data()
         uid = data["target_user"]
+        admin = message.from_user
         
         db["users"][uid]["balance"] += amount
         save_db()
         
+        # --- FAQAT EGASIGA (OWNERGA) LOG YUBORISH ---
+        log_text = (
+            f"💰 **Balans o'zgartirildi!**\n\n"
+            f"👤 Admin: {admin.full_name}\n"
+            f"🎯 Target User ID: `{uid}`\n"
+            f"🔄 O'zgarish: {amount:+d} so'm\n"
+            f"💵 Yangi balans: **{db['users'][uid]['balance']} so'm**"
+        )
+        try:
+            await bot.send_message(OWNER_ID, log_text, parse_mode="Markdown")
+        except:
+            pass
+
         await message.answer(f"✅ Foydalanuvchi ({uid}) balansi yangilandi! Yangi balans: **{db['users'][uid]['balance']} so'm**", parse_mode="Markdown")
         
-        # Foydalanuvchiga xabar berish
         try:
             await bot.send_message(uid, f"💰 Balansingizga admin tomonidan o'zgartirish kiritildi! Yangi balans: **{db['users'][uid]['balance']} so'm**", parse_mode="Markdown")
         except:
@@ -414,7 +453,7 @@ async def start_web_server():
 async def main():
     logging.basicConfig(level=logging.INFO)
     asyncio.create_task(start_web_server())
-    print("Bot 100% ishga tushdi va bazaga ulandi...")
+    print("Bot 100% ishga tushdi va maxsus xavfsizlik loglari faollashdi...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
