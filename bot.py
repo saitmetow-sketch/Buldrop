@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import json
+from datetime import datetime
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -26,6 +27,10 @@ def load_db():
                 data = json.load(f)
                 data["users"] = {int(k): v for k, v in data["users"].items()}
                 data["admins"] = set(int(x) for x in data["admins"])
+                if "request_channels" not in data:
+                    data["request_channels"] = []
+                if "logs" not in data:
+                    data["logs"] = []
                 return data
             except:
                 pass
@@ -33,6 +38,8 @@ def load_db():
         "users": {OWNER_ID: {"balance": 0}},
         "admins": {OWNER_ID},
         "channels": [], 
+        "request_channels": [],
+        "logs": [],
         "promos": {
             "42": [],
             "79": [],
@@ -46,6 +53,8 @@ def save_db():
         "users": {str(k): v for k, v in db["users"].items()},
         "admins": list(db["admins"]),
         "channels": db["channels"],
+        "request_channels": db["request_channels"],
+        "logs": db["logs"][:100],  # Oxirgi 100 ta logni saqlash
         "promos": db["promos"]
     }
     with open(DB_FILE, "w", encoding="utf-8") as f:
@@ -53,11 +62,20 @@ def save_db():
 
 db = load_db()
 
+# --- LOG QO'SHISH FUNKSIYASI ---
+def add_log(text: str):
+    time_str = datetime.now().strftime("%d.%m.%Y | %H:%M:%S")
+    log_record = f"[{time_str}] {text}"
+    db["logs"].insert(0, log_record)
+    save_db()
+
 # --- FSM (STATE) HOLATLARI ---
 class AdminStates(StatesGroup):
     waiting_for_promo = State()
     waiting_for_channel = State()
     del_channel = State()
+    waiting_for_req_channel = State()
+    del_req_channel = State()
     waiting_for_admin = State()
     del_admin = State()
     user_id_for_balance = State()
@@ -65,8 +83,6 @@ class AdminStates(StatesGroup):
 
 # --- MAJBURIY OBUNANI TEKSHIRISH ---
 async def check_subscription(user_id: int) -> bool:
-    if not db["channels"]:
-        return True
     for channel in db["channels"]:
         try:
             member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
@@ -74,6 +90,15 @@ async def check_subscription(user_id: int) -> bool:
                 return False
         except Exception:
             pass
+            
+    for channel in db["request_channels"]:
+        try:
+            member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
+            if member.status in ["left", "kicked"]:
+                return False
+        except Exception:
+            pass
+            
     return True
 
 async def get_sub_keyboard():
@@ -84,6 +109,14 @@ async def get_sub_keyboard():
             keyboard.append([InlineKeyboardButton(text=f"📢 {chat.title}", url=f"https://t.me/{ch.lstrip('@')}")])
         except:
             keyboard.append([InlineKeyboardButton(text=f"📢 Kanal", url=f"https://t.me/{ch.lstrip('@')}")])
+            
+    for ch in db["request_channels"]:
+        try:
+            chat = await bot.get_chat(ch)
+            keyboard.append([InlineKeyboardButton(text=f"📥 So'rov yuborish: {chat.title}", url=f"https://t.me/{ch.lstrip('@')}")])
+        except:
+            keyboard.append([InlineKeyboardButton(text=f"📥 So'rovli kanal", url=f"https://t.me/{ch.lstrip('@')}")])
+            
     keyboard.append([InlineKeyboardButton(text="✅ Obunani tekshirish", callback_data="check_sub")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -118,7 +151,7 @@ async def check_sub_callback(callback: types.CallbackQuery):
         await callback.message.delete()
         await callback.message.answer("🏠 **Bosh sahifa:**", reply_markup=get_main_menu(user_id), parse_mode="Markdown")
     else:
-        await callback.answer("❌ Hali hamma kanalga obuna bo'lmadingiz!", show_alert=True)
+        await callback.answer("❌ Hali hamma kanalga obuna bo'lmadingiz yoki so'rov yubormadingiz!", show_alert=True)
 
 @dp.message(F.text == "🏠 Bosh menyu")
 async def back_to_menu(message: types.Message):
@@ -190,18 +223,7 @@ async def finish_purchase(callback: types.CallbackQuery):
     promo_code = db["promos"][code_type].pop(0) 
     save_db()
     
-    # --- FAQAT EGASIGA (OWNERGA) XARID HAQIDA XABAR YUBORISH ---
-    log_text = (
-        f"🛒 **Yangi xarid amalga oshirildi!**\n\n"
-        f"👤 Foydalanuvchi: {user.full_name} (@{user.username or 'yoq'})\n"
-        f"🆔 ID: `{user_id}`\n"
-        f"📦 Tur: `{code_type}` (Narxi: {price} so'm)\n"
-        f"🔑 Berilgan kod: `{promo_code}`"
-    )
-    try:
-        await bot.send_message(OWNER_ID, log_text, parse_mode="Markdown")
-    except:
-        pass
+    add_log(f"🛒 Xarid: {user.full_name} (@{user.username or 'yoq'}, ID: {user_id}) - {code_type} turdagi kodni {price} so'mga sotib oldi.")
 
     await callback.message.delete()
     await callback.message.answer(f"🎉 **Tabriklaymiz! Xarid muvaffaqiyatli.**\n\nSizning promokodingiz:\n`{promo_code}`", parse_mode="Markdown")
@@ -227,12 +249,17 @@ async def admin_panel(message: types.Message):
     if message.from_user.id not in db["admins"]:
         return
     keyboard = [
-        [KeyboardButton(text="➕ Promokod qo'shish"), KeyboardButton(text="📊 Statistika")],
+        [KeyboardButton(text="➕ Promokod qo'shish"), KeyboardButton(text="🗑 Promokod o'chirish")],
+        [KeyboardButton(text="📊 Statistika")],
         [KeyboardButton(text="➕ Majburiy kanal"), KeyboardButton(text="➖ Kanalni o'chirish")],
-        [KeyboardButton(text="➕ Admin qo'shish"), KeyboardButton(text="➖ Adminni o'chirish")],
+        [KeyboardButton(text="➕ So'rovli kanal"), KeyboardButton(text="➖ So'rovli kanalni o'chirish")],
         [KeyboardButton(text="💰 Foydalanuvchi balansini o'zgartirish")],
-        [KeyboardButton(text="🏠 Bosh menyu")]
     ]
+    if message.from_user.id == OWNER_ID:
+        keyboard.append([KeyboardButton(text="📜 Tarix (Loglar)")])
+        keyboard.append([KeyboardButton(text="➕ Admin qo'shish"), KeyboardButton(text="➖ Adminni o'chirish")])
+        
+    keyboard.append([KeyboardButton(text="🏠 Bosh menyu")])
     await message.answer("⚙️ **Boshqaruv paneli:**", reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True), parse_mode="Markdown")
 
 @dp.message(F.text == "📊 Statistika")
@@ -242,6 +269,20 @@ async def stats(message: types.Message):
     total_users = len(db["users"])
     p_counts = "\n".join([f"• {k}-tur: {len(v)} ta" for k, v in db["promos"].items()])
     await message.answer(f"📊 **Statistika:**\n\n👥 Foydalanuvchilar: {total_users} ta\n\n📦 **Qolgan promokodlar:**\n{p_counts}", parse_mode="Markdown")
+
+# --- OWNER UCHUN TARIX (LOGLAR) ---
+@dp.message(F.text == "📜 Tarix (Loglar)")
+async def show_logs(message: types.Message):
+    if message.from_user.id != OWNER_ID:
+        return
+    if not db["logs"]:
+        await message.answer("📜 Hozircha tarix bo'sh.")
+        return
+        
+    logs_text = "📜 **Oxirgi harakatlar tarixi:**\n\n" + "\n".join(db["logs"][:25])
+    if len(logs_text) > 4000:
+        logs_text = logs_text[:4000]
+    await message.answer(logs_text, parse_mode="Markdown")
 
 # --- PROMOKOD QO'SHISH ---
 @dp.message(F.text == "➕ Promokod qo'shish")
@@ -277,23 +318,46 @@ async def save_promo_handler(message: types.Message, state: FSMContext):
             added_count += 1
             
     save_db()
-    
-    # --- FAQAT EGASIGA (OWNERGA) LOG YUBORISH ---
-    log_text = (
-        f"➕ **Admin promokod qo'shdi!**\n\n"
-        f"👤 Admin: {admin.full_name} (@{admin.username or 'yoq'})\n"
-        f"📦 Tur: `{code_type}`\n"
-        f"🔢 Soni: {added_count} ta"
-    )
-    try:
-        await bot.send_message(OWNER_ID, log_text, parse_mode="Markdown")
-    except:
-        pass
+    add_log(f"➕ Admin qo'shdi: {admin.full_name} (@{admin.username or 'yoq'}) - {added_count} ta '{code_type}' turdagi promokod qo'shdi.")
 
     await message.answer(f"✅ Muvaffaqiyatli {added_count} ta promokod `{code_type}` turiga qo'shildi!", parse_mode="Markdown")
     await state.clear()
 
-# --- KANAL QO'SHISH VA O'CHIRISH ---
+# --- PROMOKOD O'CHIRISH MENYUSI ---
+@dp.message(F.text == "🗑 Promokod o'chirish")
+async def clear_promo_menu(message: types.Message):
+    if message.from_user.id not in db["admins"]:
+        return
+    
+    p42 = len(db["promos"]["42"])
+    p79 = len(db["promos"]["79"])
+    p99 = len(db["promos"]["99"])
+    p299 = len(db["promos"]["299"])
+
+    keyboard = [
+        [InlineKeyboardButton(text=f"🗑 42-turni tozalash ({p42} ta)", callback_data="clear_p_42")],
+        [InlineKeyboardButton(text=f"🗑 79-turni tozalash ({p79} ta)", callback_data="clear_p_79")],
+        [InlineKeyboardButton(text=f"🗑 99-turni tozalash ({p99} ta)", callback_data="clear_p_99")],
+        [InlineKeyboardButton(text=f"🗑 299-turni tozalash ({p299} ta)", callback_data="clear_p_299")]
+    ]
+    await message.answer("🗑 Qaysi turdagi promokodlarni tozalash (o'chirish)ni xohlaysiz?", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+
+@dp.callback_query(F.data.startswith("clear_p_"))
+async def clear_promo_action(callback: types.CallbackQuery):
+    code_type = callback.data.split("_")[2]
+    admin = callback.from_user
+    
+    count = len(db["promos"][code_type])
+    db["promos"][code_type] = []
+    save_db()
+    
+    add_log(f"🗑 Promokod tozalandi: Admin {admin.full_name} -> {code_type} turidagi barcha ({count} ta) promokodlarni o'chirib yubordi.")
+
+    await callback.message.delete()
+    await callback.message.answer(f"✅ `{code_type}` turidagi barcha promokodlar tozalandi ({count} ta o'chirildi).", parse_mode="Markdown")
+    await callback.answer()
+
+# --- KANAL QO'SHISH VA O'CHIRISH (ODDIY) ---
 @dp.message(F.text == "➕ Majburiy kanal")
 async def add_channel_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in db["admins"]:
@@ -307,6 +371,7 @@ async def save_channel(message: types.Message, state: FSMContext):
     if ch not in db["channels"]:
         db["channels"].append(ch)
         save_db()
+        add_log(f"📢 Kanal qo'shildi: {message.from_user.full_name} tarafdan '{ch}' oddiy kanal qo'shildi.")
         await message.answer(f"✅ {ch} kanal qo'shildi!")
     else:
         await message.answer("⚠️ Bu kanal allaqachon mavjud.")
@@ -329,7 +394,51 @@ async def remove_channel(message: types.Message, state: FSMContext):
     if ch in db["channels"]:
         db["channels"].remove(ch)
         save_db()
+        add_log(f"🗑 Kanal o'chirildi: {message.from_user.full_name} tarafdan '{ch}' kanal o'chirildi.")
         await message.answer(f"❌ {ch} kanal o'chirildi!")
+    else:
+        await message.answer("❌ Bunday kanal topilmadi.")
+    await state.clear()
+
+# --- SO'ROVLI KANAL QO'SHISH VA O'CHIRISH (JOIN REQUEST) ---
+@dp.message(F.text == "➕ So'rovli kanal")
+async def add_req_channel_start(message: types.Message, state: FSMContext):
+    if message.from_user.id not in db["admins"]:
+        return
+    await message.answer("So'rov yuboriladigan kanal usernamesini yuboring (Masalan: `@kanal_username`):")
+    await state.set_state(AdminStates.waiting_for_req_channel)
+
+@dp.message(AdminStates.waiting_for_req_channel)
+async def save_req_channel(message: types.Message, state: FSMContext):
+    ch = message.text.strip()
+    if ch not in db["request_channels"]:
+        db["request_channels"].append(ch)
+        save_db()
+        add_log(f"📥 So'rovli kanal qo'shildi: {message.from_user.full_name} tarafdan '{ch}' so'rovli kanal qo'shildi.")
+        await message.answer(f"✅ {ch} so'rovli kanal qo'shildi!")
+    else:
+        await message.answer("⚠️ Bu kanal allaqachon mavjud.")
+    await state.clear()
+
+@dp.message(F.text == "➖ So'rovli kanalni o'chirish")
+async def del_req_channel_start(message: types.Message, state: FSMContext):
+    if message.from_user.id not in db["admins"]:
+        return
+    if not db["request_channels"]:
+        await message.answer("Hozircha so'rovli kanallar yo'q.")
+        return
+    text = "O'chirmoqchi bo'lgan so'rovli kanalni tanlang:\n" + "\n".join(db["request_channels"])
+    await message.answer(text + "\n\nKanal usernamesini yuboring:")
+    await state.set_state(AdminStates.del_req_channel)
+
+@dp.message(AdminStates.del_req_channel)
+async def remove_req_channel(message: types.Message, state: FSMContext):
+    ch = message.text.strip()
+    if ch in db["request_channels"]:
+        db["request_channels"].remove(ch)
+        save_db()
+        add_log(f"🗑 So'rovli kanal o'chirildi: {message.from_user.full_name} tarafdan '{ch}' so'rovli kanal o'chirildi.")
+        await message.answer(f"❌ {ch} so'rovli kanal o'chirildi!")
     else:
         await message.answer("❌ Bunday kanal topilmadi.")
     await state.clear()
@@ -338,7 +447,6 @@ async def remove_channel(message: types.Message, state: FSMContext):
 @dp.message(F.text == "➕ Admin qo'shish")
 async def add_admin_start(message: types.Message, state: FSMContext):
     if message.from_user.id != OWNER_ID:
-        await message.answer("Bu amalni faqat asosiy egasi bajarishi mumkin!")
         return
     await message.answer("Yangi adminning Telegram ID raqamini yuboring:")
     await state.set_state(AdminStates.waiting_for_admin)
@@ -349,6 +457,7 @@ async def save_admin(message: types.Message, state: FSMContext):
         new_admin_id = int(message.text.strip())
         db["admins"].add(new_admin_id)
         save_db()
+        add_log(f"👑 Admin qo'shildi: ID `{new_admin_id}` adminlar safiga qo'shildi.")
         await message.answer(f"👑 ID `{new_admin_id}` adminlar safiga qo'shildi!", parse_mode="Markdown")
     except ValueError:
         await message.answer("❌ Noto'g'ri ID raqam!")
@@ -374,6 +483,7 @@ async def remove_admin(message: types.Message, state: FSMContext):
         elif adm_id in db["admins"]:
             db["admins"].remove(adm_id)
             save_db()
+            add_log(f"🗑 Admin o'chirildi: ID `{adm_id}` adminlikdan olib tashlandi.")
             await message.answer(f"❌ Admin o'chirildi.")
         else:
             await message.answer("Bunday admin topilmadi.")
@@ -412,18 +522,7 @@ async def apply_balance_change(message: types.Message, state: FSMContext):
         db["users"][uid]["balance"] += amount
         save_db()
         
-        # --- FAQAT EGASIGA (OWNERGA) LOG YUBORISH ---
-        log_text = (
-            f"💰 **Balans o'zgartirildi!**\n\n"
-            f"👤 Admin: {admin.full_name}\n"
-            f"🎯 Target User ID: `{uid}`\n"
-            f"🔄 O'zgarish: {amount:+d} so'm\n"
-            f"💵 Yangi balans: **{db['users'][uid]['balance']} so'm**"
-        )
-        try:
-            await bot.send_message(OWNER_ID, log_text, parse_mode="Markdown")
-        except:
-            pass
+        add_log(f"💰 Balans o'zgartirildi: Admin {admin.full_name} -> ID {uid} balansiga {amount:+d} so'm qo'shdi. Yangi balans: {db['users'][uid]['balance']} so'm")
 
         await message.answer(f"✅ Foydalanuvchi ({uid}) balansi yangilandi! Yangi balans: **{db['users'][uid]['balance']} so'm**", parse_mode="Markdown")
         
@@ -453,7 +552,7 @@ async def start_web_server():
 async def main():
     logging.basicConfig(level=logging.INFO)
     asyncio.create_task(start_web_server())
-    print("Bot 100% ishga tushdi va maxsus xavfsizlik loglari faollashdi...")
+    print("Bot 100% ishga tushdi va promokod o'chirish menyusi qo'shildi...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
