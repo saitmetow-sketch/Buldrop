@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 
 # --- ASOSIY SOZLAMALAR ---
-TOKEN = "8644696840:AAE1J15_4gsDCeKzDExqOARCo38V5o3Nylo"
+TOKEN = "8644696840:AAE1J15_4gsDcEkzDExqOARCo38V5o3Nylo"
 OWNER_ID = 7020448136  # FAQAT SIZNING ID RAQAMINGIZ
 
 bot = Bot(token=TOKEN)
@@ -62,14 +62,21 @@ db = load_db()
 
 # --- FSM (STATE) HOLATLARI ---
 class AdminStates(StatesGroup):
-    waiting_for_promo = State()
+    waiting_for_promo_type = State()
+    waiting_for_promo_code = State()
     waiting_for_channel = State()
     del_channel = State()
     waiting_for_admin = State()
     del_admin = State()
     waiting_for_payment_admin = State()
-    user_id_for_balance = State()
-    new_balance_amount = State()
+
+# Narxlar Lug'ati
+PRICES = {
+    "42": 3500,
+    "79": 5500,
+    "99": 8000,
+    "299": 22000
+}
 
 # --- KLAVIATURALAR ---
 def main_menu(user_id):
@@ -88,7 +95,6 @@ def admin_menu(user_id):
         [InlineKeyboardButton(text="📢 Kanal qo'shish", callback_data="add_channel")],
         [InlineKeyboardButton(text="🗑 Kanalni o'chirish", callback_data="del_channel")]
     ]
-    # Faqat Owner uchun qo'shimcha tugmalar
     if user_id == OWNER_ID:
         keyboard.append([InlineKeyboardButton(text="👤 Admin qo'shish", callback_data="add_admin")])
         keyboard.append([InlineKeyboardButton(text="❌ Adminni o'chirish", callback_data="del_admin")])
@@ -126,12 +132,49 @@ async def top_up_balance(message: types.Message):
 @dp.message(F.text == "📦 Buldrop")
 async def show_buldrop(message: types.Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎁 42 – 3,500 so'm", callback_data="buy_42")],
-        [InlineKeyboardButton(text="🎁 79 – 5,500 so'm", callback_data="buy_79")],
-        [InlineKeyboardButton(text="🎁 99 – 8,000 so'm", callback_data="buy_99")],
-        [InlineKeyboardButton(text="🎁 299 – 22,000 so'm", callback_data="buy_299")]
+        [InlineKeyboardButton(text=f"🎁 42 – {PRICES['42']} so'm", callback_data="buy_42")],
+        [InlineKeyboardButton(text=f"🎁 79 – {PRICES['79']} so'm", callback_data="buy_79")],
+        [InlineKeyboardButton(text=f"🎁 99 – {PRICES['99']} so'm", callback_data="buy_99")],
+        [InlineKeyboardButton(text=f"🎁 299 – {PRICES['299']} so'm", callback_data="buy_299")]
     ])
     await message.answer("📦 Buldrop uchun promokodlar narxlari:", reply_markup=kb)
+
+# --- PROMOKOD SOTIB OLISH (AVTOMATIK O'CHIRISH VA YUBORISH) ---
+@dp.callback_query(F.data.startswith("buy_"))
+async def buy_promo(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    p_type = callback.data.split("_")[1]
+    price = PRICES[p_type]
+    
+    # Foydalanuvchi bazada borligini tekshirish
+    if user_id not in db["users"]:
+        db["users"][user_id] = {"balance": 0}
+        save_db()
+        
+    user_balance = db["users"][user_id]["balance"]
+    
+    # Balans yetarliligini tekshirish
+    if user_balance < price:
+        return await callback.answer(f"❌ Balansingizda mablag' yetarli emas! Kerak: {price} so'm", show_alert=True)
+    
+    # Zaxirada promokod borligini tekshirish
+    if not db["promos"].get(p_type) or len(db["promos"][p_type]) == 0:
+        return await callback.answer("❌ Kechirasiz, hozirda bu turkumda promokodlar qolmagan!", show_alert=True)
+    
+    # Promokodni olish va bazadan o'chirish
+    promo_code = db["promos"][p_type].pop(0) # Ro'yxat boshidagi bitta promokodni sug'urib oladi
+    db["users"][user_id]["balance"] -= price # Balansdan pulni ayiradi
+    save_db()
+    
+    # Foydalanuvchiga yuborish
+    await callback.message.answer(
+        f"✅ **Tabriklaymiz! Muvaffaqiyatli xarid qildingiz.**\n\n"
+        f"📦 Turkum: **{p_type}**\n"
+        f"🔑 Promokodingiz:\n`{promo_code}`\n\n"
+        f"💰 Qolgan balansingiz: {db['users'][user_id]['balance']} so'm",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
 
 # --- ADMIN PANEL ---
 @dp.message(F.text == "⚙️ Admin Panel")
@@ -147,84 +190,47 @@ async def back_home(callback: types.CallbackQuery):
     await callback.message.answer("Asosiy menyu:", reply_markup=main_menu(callback.from_user.id))
     await callback.message.delete()
 
-# --- HISOB ADMININI BOSHQARISH (FAQAT OWNER) ---
-@dp.callback_query(F.data == "set_pay_admin")
-async def set_pay_admin(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != OWNER_ID:
-        return await callback.answer("Faqat Owner uchun!", show_alert=True)
-    await callback.message.answer("Hisob admini qilmoqchi bo'lgan odamning Telegram ID raqamini yuboring:")
-    await state.set_state(AdminStates.waiting_for_payment_admin)
+# --- PROMOKOD QO'SHISH ---
+@dp.callback_query(F.data == "add_promo")
+async def add_promo_start(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    if user_id not in db["admins"] and user_id != OWNER_ID:
+        return await callback.answer("Sizda bu huquq yo'q!", show_alert=True)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="42", callback_data="p_42"), InlineKeyboardButton(text="79", callback_data="p_79")],
+        [InlineKeyboardButton(text="99", callback_data="p_99"), InlineKeyboardButton(text="299", callback_data="p_299")]
+    ])
+    await callback.message.answer("Qaysi turkumga promokod qo'shmoqchisiz?", reply_markup=kb)
     await callback.answer()
 
-@dp.message(AdminStates.waiting_for_payment_admin)
-async def save_payment_admin(message: types.Message, state: FSMContext):
-    try:
-        new_pay_admin = int(message.text)
-        db["payment_admin"] = new_pay_admin
-        save_db()
-        await message.answer(f"✅ Muvaffaqiyatli! ID: {new_pay_admin} endi Hisob admini etib tayinlandi.")
-    except ValueError:
-        await message.answer("❌ Noto'g'ri ID raqam. Faqat raqam kiriting:")
-        return
-    await state.clear()
+@dp.callback_query(F.data.startswith("p_"))
+async def select_promo_type(callback: types.CallbackQuery, state: FSMContext):
+    p_type = callback.data.split("_")[1]
+    await state.update_data(promo_type=p_type)
+    await callback.message.answer(f"📦 **{p_type}** turkumi uchun promokod(lar)ni yuboring:\n(Bir nechta bo'lsa har birini yangi qatordan yozib yuboring)")
+    await state.set_state(AdminStates.waiting_for_promo_code)
+    await callback.answer()
 
-@dp.callback_query(F.data == "rem_pay_admin")
-async def remove_pay_admin(callback: types.CallbackQuery):
-    if callback.from_user.id != OWNER_ID:
-        return await callback.answer("Faqat Owner uchun!", show_alert=True)
-    db["payment_admin"] = None
+@dp.message(AdminStates.waiting_for_promo_code)
+async def save_promo_codes(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    p_type = data.get("promo_type")
+    
+    codes = message.text.strip().split("\n")
+    added_count = 0
+    
+    for code in codes:
+        code = code.strip()
+        if code and code not in db["promos"][p_type]:
+            db["promos"][p_type].append(code)
+            added_count += 1
+            
     save_db()
-    await callback.message.answer("❌ Hisob admini o'chirildi.")
-    await callback.answer()
-
-# --- ODDIY ADMIN QO'SHISH VA O'CHIRISH (FAQAT OWNER) ---
-@dp.callback_query(F.data == "add_admin")
-async def add_admin_start(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != OWNER_ID:
-        return await callback.answer("Faqat Owner uchun!", show_alert=True)
-    await callback.message.answer("Yangi adminning Telegram ID raqamini kiriting:")
-    await state.set_state(AdminStates.waiting_for_admin)
-    await callback.answer()
-
-@dp.message(AdminStates.waiting_for_admin)
-async def save_new_admin(message: types.Message, state: FSMContext):
-    try:
-        aid = int(message.text)
-        db["admins"].add(aid)
-        save_db()
-        await message.answer(f"✅ ID: {aid} adminlar ro'yxatiga qo'shildi.")
-    except ValueError:
-        await message.answer("❌ Xato format. Faqat raqam kiriting:")
-        return
+    await message.answer(f"✅ Muvaffaqiyatli! **{p_type}** turkumiga {added_count} ta yangi promokod qo'shildi. (Jami zaxira: {len(db['promos'][p_type])} ta)")
     await state.clear()
 
-@dp.callback_query(F.data == "del_admin")
-async def del_admin_start(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != OWNER_ID:
-        return await callback.answer("Faqat Owner uchun!", show_alert=True)
-    await callback.message.answer(f"O'chirmoqchi bo'lgan admin ID raqamini kiriting (Adminlar: {list(db['admins'])}):")
-    await state.set_state(AdminStates.del_admin)
-    await callback.answer()
-
-@dp.message(AdminStates.del_admin)
-async def remove_admin(message: types.Message, state: FSMContext):
-    try:
-        aid = int(message.text)
-        if aid == OWNER_ID:
-            await message.answer("❌ Owner'ni o'chirib bo'lmaydi!")
-            return
-        if aid in db["admins"]:
-            db["admins"].remove(aid)
-            save_db()
-            await message.answer(f"✅ ID: {aid} adminlikdan olib tashlandi.")
-        else:
-            await message.answer("❌ Bu ID ro'yxatda yo'q.")
-    except ValueError:
-        await message.answer("❌ Xato format.")
-        return
-    await state.clear()
-
-# --- KANALLarni BOSHQARISH (ADMINLAR VA OWNER UCHUN) ---
+# --- KANALLARNI BOSHQARISH ---
 @dp.callback_query(F.data == "add_channel")
 async def add_channel_start(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -265,22 +271,20 @@ async def remove_channel(message: types.Message, state: FSMContext):
         await message.answer("❌ Bunday kanal topilmadi.")
     await state.clear()
 
-# --- CHEK KELGANDA FAQAT OWNER VA HISOB ADMINIGA YUBORISH ---
+# --- CHEK KELGANDA ---
 @dp.message(F.photo | F.document)
 async def catch_payment_proof(message: types.Message):
     user_id = message.from_user.id
     if user_id in db["admins"] or user_id == OWNER_ID:
-        return # Adminlarning o'zi yuborgan bo'lsa e'tibor bermaymiz
+        return 
 
     caption = f"🔔 **Yangi to'lov cheki keldi!**\n👤 Foydalanuvchi: [Profil](tg://user?id={user_id})\n🆔 ID: `{user_id}`"
     
-    # Ownerga yuborish
     try:
         await message.send_copy(chat_id=OWNER_ID, caption=caption, parse_mode="Markdown")
     except:
         pass
 
-    # Hisob adminiga yuborish (agar tayinlangan bo'lsa)
     pay_admin = db.get("payment_admin")
     if pay_admin and pay_admin != OWNER_ID:
         try:
