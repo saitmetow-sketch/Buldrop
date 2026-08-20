@@ -394,17 +394,7 @@ async def handle_join_request(request: types.ChatJoinRequest):
                 "🔔 Kanalga qo'shilish so'rovingiz qabul qilindi!\n\n"
                 "Tez orada adminlar tasdiqlashadi."
             )
-        except Exception:
-            pass
-    except Exception as e:
-        logging.exception(f"Join Request xatosi: {e}")
-
-        except Exception:
-            pass
-    except Exception as e:
-        logging.exception(f"Join Request tasdiqlash xatosi: {e}")
-
-
+        
 @dp.callback_query(F.data == "no_link")
 async def no_link(callback: types.CallbackQuery):
     await callback.answer("Bu kanal uchun havola sozlanmagan.", show_alert=True)
