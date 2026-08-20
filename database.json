@@ -1,20 +1,25 @@
-{
-    "users": {
-        "7020448136": {
-            "balance": 0
-        }
-    },
-    "admins": [
-        7020448136
-    ],
-    "payment_admin": null,
-    "channels": [],
-    "request_channels": [],
-    "logs": [],
-    "promos": {
-        "42": [],
-        "79": [],
-        "99": [],
-        "299": []
+def default_db():
+    return {
+        "users": {
+            str(OWNER_ID): {
+                "balance": 0,
+                "referred_by": None,
+                "referrals_count": 0,
+                "received_free_promo": False
+            }
+        },
+        "admins": [
+            OWNER_ID
+        ],
+        "req_channels": [],
+        "sub_channels": [],
+        "payment_admins": [],
+        "logs": [],
+        "promos": {
+            "42": [],
+            "79": [],
+            "99": [],
+            "299": []
+        },
+        "free_promos": [] # Tekin promokodlar uchun alohida ro'yxat
     }
-}
