@@ -187,8 +187,14 @@ def is_admin(user_id: int):
 def normalize_channel(text: str):
     text = text.strip()
 
+    if text.startswith("-100") or (text.isdigit() and not text.startswith("-")):
+        return int(text) if text.isdigit() else text
+
     if text.startswith("https://t.me/"):
-        text = "@" + text.split("https://t.me/")[1].split("/")[0]
+        parts = text.split("https://t.me/")[1].split("/")
+        if parts[0].startswith("+") or "joinchat" in text:
+            return text
+        text = "@" + parts[0]
 
     if text.startswith("t.me/"):
         text = "@" + text.split("t.me/")[1].split("/")[0]
@@ -197,6 +203,7 @@ def normalize_channel(text: str):
         text = "@" + text
 
     return text
+
 
 
 async def get_channel_name(channel):
