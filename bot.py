@@ -383,18 +383,18 @@ async def handle_join_request(request: types.ChatJoinRequest):
 
     if not allowed:
         return
-
     try:
         add_user(user_id)
         add_log(f"🔔 Join Request keldi: {user_id} -> {chat_id}")
+        await bot.send_message(
+            user_id,
+            "🔔 Kanalga qo'shilish so'rovingiz qabul qilindi!\n\n"
+            "Tez orada adminlar tasdiqlashadi."
+        )
+    except Exception as e:
+        logging.exception(f"Join Request xatosi: {e}")
 
-        try:
-            await bot.send_message(
-                user_id,
-                "🔔 Kanalga qo'shilish so'rovingiz qabul qilindi!\n\n"
-                "Tez orada adminlar tasdiqlashadi."
-            )
-        
+    
 @dp.callback_query(F.data == "no_link")
 async def no_link(callback: types.CallbackQuery):
     await callback.answer("Bu kanal uchun havola sozlanmagan.", show_alert=True)
