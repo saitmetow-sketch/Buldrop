@@ -25,7 +25,6 @@ DB_FILE = "database.json"
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN topilmadi!")
 
-
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -37,7 +36,10 @@ def default_db():
     return {
         "users": {
             str(OWNER_ID): {
-                "balance": 0
+                "balance": 0,
+                "referred_by": None,
+                "referrals_count": 0,
+                "received_free_promo": False
             }
         },
         "admins": [
@@ -52,7 +54,8 @@ def default_db():
             "79": [],
             "99": [],
             "299": []
-        }
+        },
+        "free_promos": []  # Tekin promokodlar uchun ro'yxat
     }
 
 
@@ -79,6 +82,13 @@ def load_db():
                 "299": []
             }
         )
+        data.setdefault("free_promos", [])
+
+        # Mavjud userlarga referal maydonlari yetishmasa, to'ldirib ketamiz
+        for uid in data["users"]:
+            data["users"][uid].setdefault("referred_by", None)
+            data["users"][uid].setdefault("referrals_count", 0)
+            data["users"][uid].setdefault("received_free_promo", False)
 
         return data
 
@@ -105,7 +115,10 @@ def add_user(user_id: int):
 
     if uid not in db["users"]:
         db["users"][uid] = {
-            "balance": 0
+            "balance": 0,
+            "referred_by": None,
+            "referrals_count": 0,
+            "received_free_promo": False
         }
         save_db()
 
@@ -135,6 +148,7 @@ def add_log(text: str):
 
 class AdminStates(StatesGroup):
     waiting_for_promo = State()
+    waiting_for_free_promo = State()  # Tekin promokodlar uchun holat
 
     waiting_for_sub_ch = State()
     del_sub_ch = State()
@@ -205,7 +219,6 @@ async def check_one_channel(user_id: int, channel: str):
             user_id=user_id
         )
 
-        # Foydalanuvchi kanalga kirgan bo'lishi kerak
         if member.status in (
             "member",
             "administrator",
@@ -213,7 +226,6 @@ async def check_one_channel(user_id: int, channel: str):
         ):
             return True
 
-        # restricted holatda ham is_member True bo'lishi mumkin
         if member.status == "restricted":
             return getattr(member, "is_member", False)
 
@@ -223,8 +235,6 @@ async def check_one_channel(user_id: int, channel: str):
         logging.warning(
             f"Kanal tekshirish xatosi {channel}: {e}"
         )
-
-        # Xatoni "obuna bo'lgan" deb hisoblamaymiz
         return False
 
 
@@ -270,8 +280,6 @@ async def get_sub_keyboard():
             if chat.username:
                 url = f"https://t.me/{chat.username}"
             else:
-                # Private kanal uchun username bo'lmasa,
-                # admin invite linkini alohida ishlatish kerak.
                 url = None
 
             if url:
@@ -324,8 +332,13 @@ def get_main_menu(user_id):
         ],
         [
             KeyboardButton(
-                text="💳 Balans"
+                text="🎁 Tekin promokod"
             ),
+            KeyboardButton(
+                text="💳 Balans"
+            )
+        ],
+        [
             KeyboardButton(
                 text="➕ Balans to'ldirish"
             )
@@ -360,8 +373,33 @@ def get_main_menu(user_id):
 async def cmd_start(message: types.Message):
 
     user_id = message.from_user.id
-
     add_user(user_id)
+
+    # Referal havolani tekshirish (/start ID)
+    args = message.text.split()
+    if len(args) > 1:
+        try:
+            referrer_id = int(args[1])
+            if referrer_id != user_id and str(user_id) in db["users"]:
+                if db["users"][str(user_id)].get("referred_by") is None:
+                    db["users"][str(user_id)]["referred_by"] = referrer_id
+                    
+                    ref_str = str(referrer_id)
+                    if ref_str in db["users"]:
+                        db["users"][ref_str]["referrals_count"] = db["users"][ref_str].get("referrals_count", 0) + 1
+                        save_db()
+                        
+                        try:
+                            count = db["users"][ref_str]["referrals_count"]
+                            await bot.send_message(
+                                referrer_id,
+                                f"👥 Yangi do'stingiz botga kirdi!\n"
+                                f"Sizning taklif qilgan do'stlaringiz soni: {count}/3 ta."
+                            )
+                        except Exception:
+                            pass
+        except ValueError:
+            pass
 
     if not await check_subscription(user_id):
 
@@ -394,7 +432,6 @@ async def handle_join_request(
     user_id = request.from_user.id
     chat_id = request.chat.id
 
-    # Faqat bizning req_channels ichidagi kanallar
     allowed = False
 
     for channel in db["req_channels"]:
@@ -412,7 +449,6 @@ async def handle_join_request(
         return
 
     try:
-        # Join Requestni avtomatik tasdiqlaymiz
         await bot.approve_chat_join_request(
             chat_id=chat_id,
             user_id=user_id
@@ -436,7 +472,6 @@ async def handle_join_request(
             pass
 
     except Exception as e:
-
         logging.exception(
             f"Join Request tasdiqlash xatosi: {e}"
         )
@@ -506,6 +541,61 @@ async def back_to_menu(message: types.Message):
         reply_markup=get_main_menu(user_id),
         parse_mode="HTML"
     )
+
+
+# =========================================================
+# TEKIN PROMOKOD (REFERAL TIZIMI)
+# =========================================================
+
+@dp.message(F.text == "🎁 Tekin promokod")
+async def free_promo_menu(message: types.Message):
+    user_id = message.from_user.id
+    add_user(user_id)
+
+    if not await check_subscription(user_id):
+        await message.answer(
+            "⚠️ Avval kanallarga obuna bo'ling!",
+            reply_markup=await get_sub_keyboard()
+        )
+        return
+
+    user_data = db["users"][str(user_id)]
+    ref_count = user_data.get("referrals_count", 0)
+    received = user_data.get("received_free_promo", False)
+
+    bot_info = await bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
+
+    text = (
+        "🎁 <b>Tekin promokod olish bo'limi!</b>\n\n"
+        "Do'stlaringizni taklif qiling va mutlaqo bepul promokod yutib oling!\n"
+        "📌 <b>Shart:</b> 3 ta do'stingizni taklif qiling.\n\n"
+        f"📊 Sizning taklif qilgan do'stlaringiz: <b>{ref_count}/3 ta</b>\n\n"
+        f"🔗 <b>Sizning taklif havolangiz:</b>\n`{ref_link}`\n\n"
+    )
+
+    if received:
+        text += "✅ Siz allaqachon tekin promokodingizni olgansiz!"
+        await message.answer(text, parse_mode="HTML")
+    elif ref_count >= 3:
+        if db["free_promos"]:
+            promo = db["free_promos"].pop(0)  # Bazadan sug'urib olamiz va o'chiramiz
+            db["users"][str(user_id)]["received_free_promo"] = True
+            save_db()
+
+            text += (
+                f"🎉 <b>Tabriklaymiz! Siz shartni bajardingiz!</b>\n\n"
+                f"🎁 Sizning tekin promokodingiz:\n<code>{promo}</code>"
+            )
+            add_log(f"🎁 Foydalanuvchi {user_id} 3 ta do'st chaqirib tekin promokod oldi.")
+        else:
+            text += "⏳ Hozircha tekin promokodlar tugagan. Adminlar tez orada qo'shishadi, biroz kuting!"
+
+        await message.answer(text, parse_mode="HTML")
+    else:
+        needed = 3 - ref_count
+        text += f"❌ Tekin promokod olish uchun yana <b>{needed} ta</b> do'st taklif qilishingiz kerak."
+        await message.answer(text, parse_mode="HTML")
 
 
 # =========================================================
@@ -807,7 +897,15 @@ async def admin_panel(
                 text="➕ Promokod qo'shish"
             ),
             KeyboardButton(
+                text="➕ Tekin promokod qo'shish"
+            )
+        ],
+        [
+            KeyboardButton(
                 text="📊 Statistika"
+            ),
+            KeyboardButton(
+                text="📢 Xabar yuborish (Reklama)"
             )
         ],
         [
@@ -824,11 +922,6 @@ async def admin_panel(
             ),
             KeyboardButton(
                 text="➖ So'rovli kanalni o'chirish"
-            )
-        ],
-        [
-            KeyboardButton(
-                text="📢 Xabar yuborish (Reklama)"
             )
         ],
         [
@@ -867,8 +960,9 @@ async def stats(message: types.Message):
 
     text = (
         "📊 <b>Statistika</b>\n\n"
-        f"👥 Foydalanuvchilar: {total_users}\n\n"
-        "📦 <b>Qolgan promokodlar:</b>\n"
+        f"👥 Foydalanuvchilar: {total_users}\n"
+        f"🎁 Tekin promokodlar: {len(db['free_promos'])} ta\n\n"
+        "📦 <b>Qolgan pullik promokodlar:</b>\n"
     )
 
     for code_type in PRICES:
@@ -891,7 +985,56 @@ async def stats(message: types.Message):
 
 
 # =========================================================
-# PROMOKOD QO'SHISH
+# TEKIN PROMOKOD QO'SHISH (ADMIN)
+# =========================================================
+
+@dp.message(F.text == "➕ Tekin promokod qo'shish")
+async def add_free_promo_start(
+    message: types.Message,
+    state: FSMContext
+):
+    if not is_admin(message.from_user.id):
+        return
+
+    await message.answer(
+        "🎁 <b>Tekin promokodlar qo'shish</b>\n\n"
+        "Yangi qatordan tekin promokodlarni yuboring:",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminStates.waiting_for_free_promo)
+
+
+@dp.message(AdminStates.waiting_for_free_promo)
+async def save_free_promo_handler(
+    message: types.Message,
+    state: FSMContext
+):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    if not message.text:
+        await message.answer("❌ Kodlarni matn ko'rinishida yuboring.")
+        return
+
+    codes = message.text.splitlines()
+    added = 0
+
+    for code in codes:
+        code = code.strip()
+        if code:
+            db["free_promos"].append(code)
+            added += 1
+
+    save_db()
+    add_log(f"➕ Admin {message.from_user.id} {added} ta tekin promokod qo'shdi.")
+
+    await message.answer(f"✅ Bazaga {added} ta tekin promokod qo'shildi.")
+    await state.clear()
+
+
+# =========================================================
+# PROMOKOD QO'SHISH (PULLIK)
 # =========================================================
 
 @dp.message(F.text == "➕ Promokod qo'shish")
@@ -1048,7 +1191,6 @@ async def save_sub_ch(
 
     if ch not in db["sub_channels"]:
 
-        # Kanalni tekshiramiz
         try:
             await bot.get_chat(ch)
 
@@ -1199,8 +1341,6 @@ async def save_req_ch(
     try:
 
         chat = await bot.get_chat(ch)
-
-        # Botning admin ekanini tekshirish
         me = await bot.get_me()
 
         member = await bot.get_chat_member(
@@ -1221,7 +1361,6 @@ async def save_req_ch(
             return
 
         db["req_channels"].append(ch)
-
         save_db()
 
         add_log(
@@ -1890,8 +2029,6 @@ async def broadcast_send(
             )
 
             success += 1
-
-            # Telegram flood limitini kamaytirish
             await asyncio.sleep(0.08)
 
         except Exception:
@@ -2017,13 +2154,10 @@ async def main():
 
     await start_web_server()
 
-    # Render free xizmatida uxlab qolishni
-    # kamaytirish uchun ping.
     asyncio.create_task(
         self_ping()
     )
 
-    # Eski webhookni o'chiramiz
     await bot.delete_webhook(
         drop_pending_updates=True
     )
