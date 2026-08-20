@@ -1,190 +1,412 @@
-import json
+import asyncio
+import logging
 import os
-import telebot
-from telebot import types
+import json
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
 
-TOKEN = "8644696840:AAFhsRFaMsz8XrySdMV4kAVAJ4RbITaJT34"
-bot = telebot.TeleBot(TOKEN)
+# --- ASOSIY SOZLAMALAR ---
+TOKEN = "8644696840:AAE1J15_4gsDcEkzDExqOARCo38V5o3Nylo"
+OWNER_ID = 7020448136  # SIZNING ID RAQAMINGIZ
 
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
+# --- BAZANI FAYLDA SAQLASH (JSON) ---
 DB_FILE = "database.json"
 
-# Asosiy bazani yaratish yoki yuklash
 def load_db():
-    if not os.path.exists(DB_FILE):
-        default_data = {
-            "users": {},  # user_id: {"balance": 0, "username": "..."}
-            "channels": [],  # {"id": "@kanal", "type": "mandatory"/"request"}
-            "admins": [],  # admin_id lar
-            "balance_admins": [],  # Hisob to'ldiruvchi admin id lari
-            "buldrops": {"1": 10, "2": 5, "3": 2, "4": 0},  # 4 ta son va ularning miqdori
-            "history": []  # Tarix uchun
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            try:
+                data = json.load(f)
+                data["users"] = {int(k): v for k, v in data["users"].items()}
+                data["admins"] = set(int(x) for x in data["admins"])
+                if data.get("payment_admin"):
+                    data["payment_admin"] = int(data["payment_admin"])
+                return data
+            except:
+                pass
+    return {
+        "users": {str(OWNER_ID): {"balance": 0}},
+        "admins": [OWNER_ID],
+        "payment_admin": None,
+        "channels": [],
+        "request_channels": [],
+        "logs": [],
+        "promos": {
+            "42": [],
+            "79": [],
+            "99": [],
+            "299": []
         }
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(default_data, f, ensure_ascii=False, indent=4)
-    with open(DB_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    }
 
-def save_db(data):
+def save_db():
+    data = {
+        "users": {str(k): v for k, v in db["users"].items()},
+        "admins": list(db["admins"]),
+        "payment_admin": db["payment_admin"],
+        "channels": db["channels"],
+        "request_channels": db["request_channels"],
+        "logs": db["logs"],
+        "promos": db["promos"]
+    }
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-def log_history(text):
-    db = load_db()
-    db["history"].append(text)
-    save_db(db)
+db = load_db()
 
-# Obunani tekshirish funksiyasi
-def check_subscriptions(user_id):
-    db = load_db()
-    channels = db["channels"]
-    not_subscribed = []
+# --- FSM (STATE) HOLATLARI ---
+class AdminStates(StatesGroup):
+    waiting_for_promo_type = State()
+    waiting_for_promo_code = State()
+    waiting_for_channel = State()
+    del_channel = State()
+    waiting_for_admin = State()
+    del_admin = State()
+    waiting_for_payment_admin = State()
+    waiting_for_balance_change = State()
+
+# --- NARXLAR LUG'ATI ---
+PRICES = {
+    "42": 3500,
+    "79": 5500,
+    "99": 8000,
+    "299": 22000
+}
+
+# --- KLAVIATURALAR ---
+def main_menu(user_id):
+    keyboard = [
+        [KeyboardButton(text="📦 Buldrop"), KeyboardButton(text="💳 Balans")],
+        [KeyboardButton(text="➕ Balans to'ldirish")]
+    ]
+    if user_id in db["admins"] or user_id == OWNER_ID:
+        keyboard.append([KeyboardButton(text="⚙️ Admin Panel")])
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+def admin_menu(user_id):
+    keyboard = [
+        [InlineKeyboardButton(text="➕ Promokod qo'shish", callback_data="add_promo")],
+        [InlineKeyboardButton(text="💰 Balansni o'zgartirish", callback_data="change_balance")],
+        [InlineKeyboardButton(text="📢 Kanal qo'shish", callback_data="add_channel")],
+        [InlineKeyboardButton(text="🗑 Kanalni o'chirish", callback_data="del_channel")]
+    ]
+    if user_id == OWNER_ID:
+        keyboard.append([InlineKeyboardButton(text="👤 Admin qo'shish", callback_data="add_admin")])
+        keyboard.append([InlineKeyboardButton(text="❌ Adminni o'chirish", callback_data="del_admin")])
+        keyboard.append([InlineKeyboardButton(text="💳 Hisob adminini qo'shish", callback_data="set_pay_admin")])
+        keyboard.append([InlineKeyboardButton(text="❌ Hisob adminini o'chirish", callback_data="rem_pay_admin")])
     
-    for ch in channels:
-        channel_id = ch["id"]
-        try:
-            member = bot.get_chat_member(channel_id, user_id)
-            if member.status not in ['member', 'administrator', 'creator']:
-                not_subscribed.append(channel_id)
-        except Exception:
-            # Agar bot kanalga qo'shilmagan bo'lsa yoki xatolik bo'lsa o'tkazib yubormaslik uchun
-            not_subscribed.append(channel_id)
-    return not_subscribed
+    keyboard.append([InlineKeyboardButton(text="🔙 Asosiy menyu", callback_data="back_home")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# Start komandasi
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
+# --- START KOMANDASI ---
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    db = load_db()
+    if user_id not in db["users"]:
+        db["users"][user_id] = {"balance": 0}
+        save_db()
     
-    if str(user_id) not in db["users"]:
-        db["users"][str(user_id)] = {"balance": 0, "username": message.from_user.username or "Noma'lum"}
-        save_db(db)
-        log_history(f"Yangi foydalanuvchi: {user_id}")
+    await message.answer(
+        "👋 Assalomu alaykum! Buldrop botiga xush kelibsiz.",
+        reply_markup=main_menu(user_id)
+    )
 
-    not_sub = check_subscriptions(user_id)
-    if not_sub:
-        markup = types.InlineKeyboardMarkup()
-        for ch in not_sub:
-            markup.add(types.InlineKeyboardButton(f"Obuna bo'lish 📢", url=f"https://t.me/{ch.replace('@', '')}"))
-        markup.add(types.InlineKeyboardButton("✅ Obunani tekshirish", callback_data="check_sub"))
-        bot.send_message(message.chat.id, "Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling:", reply_markup=markup)
-    else:
-        show_main_menu(message.chat.id, user_id)
-
-@bot.callback_query_handler(func=lambda call: call.data == "check_sub")
-def callback_check_sub(call):
-    user_id = call.from_user.id
-    not_sub = check_subscriptions(user_id)
-    if not_sub:
-        bot.answer_callback_query(call.id, "Hamma kanalga obuna bo'linmadi ❌", show_alert=True)
-    else:
-        bot.answer_callback_query(call.id, "Rahmat, obuna tasdiqlandi ✅")
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        show_main_menu(call.message.chat.id, user_id)
-
-def show_main_menu(chat_id, user_id):
-    db = load_db()
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("🎁 Buldrop", "💳 Balansni to'ldirish")
-    
-    # Oddiy admin yoki owner tekshiruvi
-    if user_id in db["admins"] or user_id in db["balance_admins"] or str(user_id) == str(list(db["users"].keys())[0]): # misol uchun 1-foydalanuvchi yoki owner
-        markup.add("🛠 Admin panel")
-    
-    # Owner uchun maxsus tugma (kodda o'zingizning Telegram ID raqamingizni yozib qo'yishingiz mumkin)
-    OWNER_ID = 123456789 # O'z ID raqamingizni yozing
-    if user_id == OWNER_ID or str(user_id) in [str(x) for x in db.get("owners", [])]:
-        markup.add("👑 Owner menyu")
-
-    bot.send_message(chat_id, "Asosiy menyushiga xush kelibsiz:", reply_markup=markup)
-
-# Tugmalar bosilganda
-@bot.message_handler(func=lambda message: True)
-def handle_text(message):
+# --- ASOSIY MENYU ---
+@dp.message(F.text == "💳 Balans")
+async def show_balance(message: types.Message):
     user_id = message.from_user.id
-    text = message.text
-    db = load_db()
+    balance = db["users"].get(user_id, {}).get("balance", 0)
+    await message.answer(f"🆔 ID: `{user_id}`\n💰 Balansingiz: {balance} so'm", parse_mode="Markdown")
 
-    if text == "🎁 Buldrop":
-        buldrops = db["buldrops"]
-        msg = "🎁 **Buldrop ma'lumotlari:**\n\n"
-        for k, v in buldrops.items( ):
-            msg += f"• {k}-son: {v} ta mavjud\n"
-        bot.send_message(message.chat.id, msg, parse_mode="Markdown")
+@dp.message(F.text == "➕ Balans to'ldirish")
+async def top_up_balance(message: types.Message):
+    pay_admin = db.get("payment_admin")
+    admin_info = ""
+    if pay_admin:
+        admin_info = f"\n\n📞 Hisob admini: [Murojaat qilish](tg://user?id={pay_admin})"
+    
+    pay_text = f"💳 **Balansni to'ldirish uchun:**\n\nKarta raqamiga pul o'tkazing va chekni hamda ID raqamingizni adminga yuboring.{admin_info}"
+    await message.answer(pay_text, parse_mode="Markdown")
 
-    elif text == "💳 Balansni to'ldirish":
-        if db["balance_admins"]:
-            # Hisob to'ldiruvchi adminning userini chiqarish
-            b_admin_id = db["balance_admins"][0]
-            try:
-                chat_info = bot.get_chat(b_admin_id)
-                username = chat_info.username
-                if username:
-                    bot.send_message(message.chat.id, f"💳 Balansni to'ldirish uchun hisob adminiga yozing: @{username}\n🆔 ID: {b_admin_id}")
-                else:
-                    bot.send_message(message.chat.id, f"💳 Balansni to'ldirish uchun hisob adminiga yozing: tg://user?id={b_admin_id}")
-            except:
-                bot.send_message(message.chat.id, "Hozirda hisob admini topilmadi.")
-        else:
-            bot.send_message(message.chat.id, "Hozirda hisob to'ldirish admini tayinlanmagan.")
+@dp.message(F.text == "📦 Buldrop")
+async def show_buldrop(message: types.Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🎁 42 – {PRICES['42']} so'm", callback_data="buy_42")],
+        [InlineKeyboardButton(text=f"🎁 79 – {PRICES['79']} so'm", callback_data="buy_79")],
+        [InlineKeyboardButton(text=f"🎁 99 – {PRICES['99']} so'm", callback_data="buy_99")],
+        [InlineKeyboardButton(text=f"🎁 299 – {PRICES['299']} so'm", callback_data="buy_299")]
+    ])
+    await message.answer("📦 Buldrop uchun promokodlar narxlari va turlari:", reply_markup=kb)
 
-    elif text == "🛠 Admin panel":
-        if user_id in db["admins"] or user_id in db["balance_admins"]:
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-            markup.add("➕ Majburiy kanal qo'shish", "➖ Majburiy kanal o'chirish")
-            markup.add("➕ So'rovli kanal qo'shish", "➖ So'rovli kanal o'chirish")
-            markup.add("📊 Statistika", "📤 Xabar yuborish")
-            markup.add("📢 Reklama yuborish", "❌ Reklama o'chirish")
-            markup.add("💰 Balansni o'zgartirish", "🔙 Orqaga")
-            bot.send_message(message.chat.id, "Admin panelga xush kelibsiz:", reply_markup=markup)
-        else:
-            bot.send_message(message.chat.id, "Sizda admin huquqi yo'q.")
+# --- BULDROP SOTIB OLISH ---
+@dp.callback_query(F.data.startswith("buy_"))
+async def buy_promo(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    p_type = callback.data.split("_")[1]
+    
+    price = PRICES.get(p_type, 0)
+    user_balance = db["users"].get(user_id, {}).get("balance", 0)
+    
+    if not db["promos"].get(p_type) or len(db["promos"][p_type]) == 0:
+        return await callback.answer(f"⚠️ Hozirda {p_type} turkumidagi promokodlar tugagan!", show_alert=True)
+    
+    if user_balance < price:
+        return await callback.answer(f"❌ Balansingiz yetarli emas! Kerakli summa: {price} so'm", show_alert=True)
+    
+    db["users"][user_id]["balance"] -= price
+    promo_code = db["promos"][p_type].pop(0)
+    save_db()
+    
+    await callback.message.answer(
+        f"✅ **Tabriklaymiz! Xarid muvaffaqiyatli.**\n\n"
+        f"📦 Turkum: **{p_type}**\n"
+        f"🎟 Promokodingiz:\n`{promo_code}`\n\n"
+        f"💰 Qolgan balans: {db['users'][user_id]['balance']} so'm",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
 
-    elif text == "👑 Owner menyu":
-        OWNER_ID = 123456789 # O'zingizning ID raqamingiz
-        if user_id == OWNER_ID:
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-            markup.add("➕ Admin qo'shish", "➖ Admin o'chirish")
-            markup.add("➕ Hisob admini qo'shish", "➖ Hisob admini o'chirish")
-            markup.add("📜 Tarix bo'limi", "🔙 Orqaga")
-            bot.send_message(message.chat.id, "Owner menyusiga xush kelibsiz:", reply_markup=markup)
-        else:
-            bot.send_message(message.chat.id, "Bu menyu faqat bot egasi uchun!")
+# --- ADMIN PANEL ---
+@dp.message(F.text == "⚙️ Admin Panel")
+async def open_admin(message: types.Message):
+    user_id = message.from_user.id
+    if user_id in db["admins"] or user_id == OWNER_ID:
+        await message.answer("⚙️ Admin panelga xush kelibsiz:", reply_markup=admin_menu(user_id))
+    else:
+        await message.answer("Sizda bu bo'limga kirish huquqi yo'q.")
 
-    elif text == "🔙 Orqaga":
-        show_main_menu(message.chat.id, user_id)
+@dp.callback_query(F.data == "back_home")
+async def back_home(callback: types.CallbackQuery):
+    await callback.message.answer("Asosiy menyu:", reply_markup=main_menu(callback.from_user.id))
+    await callback.message.delete()
 
-    elif text == "📜 Tarix bo'limi":
-        if user_id == 123456789: # Owner tekshiruvi
-            history_text = "\n".join(db["history"][-20:]) # Oxirgi 20 ta harakat
-            bot.send_message(message.chat.id, f"📜 **Bot tarixi (oxirgi amallar):**\n\n{history_text or 'Hozircha tarix bo\'sh'}", parse_mode="Markdown")
+# --- BALANSNI O'ZGARTIRISH ---
+@dp.callback_query(F.data == "change_balance")
+async def change_balance_start(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    if user_id not in db["admins"] and user_id != OWNER_ID:
+        return await callback.answer("Sizda bu huquq yo'q!", show_alert=True)
+    
+    await callback.message.answer(
+        "✍️ Foydalanuvchi ID raqami va qo'shiladigan/ayiriladigan summani yuboring:\n"
+        "Format: `ID summa` (Masalan: `7020448136 5000` yoki `-2000`)",
+        parse_mode="Markdown"
+    )
+    await state.set_state(AdminStates.waiting_for_balance_change)
+    await callback.answer()
 
-    elif text == "📊 Statistika":
-        users_count = len(db["users"])
-        channels_count = len(db["channels"])
-        bot.send_message(message.chat.id, f"📊 **Statistika:**\n\n👥 Foydalanuvchilar soni: {users_count}\n📢 Kanallar soni: {channels_count}", parse_mode="Markdown")
-
-    elif text == "💰 Balansni o'zgartirish":
-        msg = bot.send_message(message.chat.id, "Foydalanuvchi ID raqami va qo'shiladigan/ayiriladigan summani yuboring:\nFormat: `ID summa` (Masalan: `12345678 500` yoki `-200`)", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, process_change_balance)
-
-def process_change_balance(message):
+@dp.message(AdminStates.waiting_for_balance_change)
+async def process_balance_change(message: types.Message, state: FSMContext):
     try:
-        parts = message.text.split()
-        target_id = parts[0]
+        parts = message.text.strip().split()
+        target_id = int(parts[0])
         amount = int(parts[1])
-        db = load_db()
-        if target_id in db["users"]:
-            db["users"][target_id]["balance"] += amount
-            save_db(db)
-            bot.send_message(message.chat.id, f"Muvaffaqiyatli! Foydalanuvchi balansi o'zgartirildi.")
-            log_history(f"Admin {message.from_user.id} user {target_id} balansini {amount} ga o'zgartirdi.")
-        else:
-            bot.send_message(message.chat.id, "Foydalanuvchi topilmadi.")
+        
+        if target_id not in db["users"]:
+            db["users"][target_id] = {"balance": 0}
+            
+        db["users"][target_id]["balance"] += amount
+        save_db()
+        
+        await message.answer(f"✅ Muvaffaqiyatli! ID: `{target_id}` foydalanuvchi balansi `{amount}` so'mga o'zgartirildi.", parse_mode="Markdown")
+        
+        try:
+            await bot.send_message(target_id, f"💳 Balansingizga `{amount}` so'm o'zgartirildi/qo'shildi!", parse_mode="Markdown")
+        except:
+            pass
+            
     except Exception:
-        bot.send_message(message.chat.id, "Xato format! Qaytadan urinib ko'ring.")
+        await message.answer("❌ Xato format! Qaytadan urinib ko'ring (Masalan: `7020448136 5000`)", parse_mode="Markdown")
+    
+    await state.clear()
+
+# --- PROMOKOD QO'SHISH ---
+@dp.callback_query(F.data == "add_promo")
+async def add_promo_start(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    if user_id not in db["admins"] and user_id != OWNER_ID:
+        return await callback.answer("Sizda bu huquq yo'q!", show_alert=True)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="42", callback_data="p_42"), InlineKeyboardButton(text="79", callback_data="p_79")],
+        [InlineKeyboardButton(text="99", callback_data="p_99"), InlineKeyboardButton(text="299", callback_data="p_299")]
+    ])
+    await callback.message.answer("Qaysi turkumga promokod qo'shmoqchisiz?", reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("p_"))
+async def select_promo_type(callback: types.CallbackQuery, state: FSMContext):
+    p_type = callback.data.split("_")[1]
+    await state.update_data(promo_type=p_type)
+    await callback.message.answer(f"📦 **{p_type}** turkumi uchun promokod(lar)ni yuboring:\n(Har birini yangi qatordan yozib yuboring)")
+    await state.set_state(AdminStates.waiting_for_promo_code)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_promo_code)
+async def save_promo_codes(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    p_type = data.get("promo_type")
+    
+    codes = message.text.strip().split("\n")
+    added_count = 0
+    
+    for code in codes:
+        code = code.strip()
+        if code and code not in db["promos"][p_type]:
+            db["promos"][p_type].append(code)
+            added_count += 1
+            
+    save_db()
+    await message.answer(f"✅ **{p_type}** turkumiga {added_count} ta promokod qo'shildi. (Jami zaxira: {len(db['promos'][p_type])} ta)")
+    await state.clear()
+
+# --- HISOB ADMININI BOSHQARISH (FAQAT OWNER UCHUN) ---
+@dp.callback_query(F.data == "set_pay_admin")
+async def set_pay_admin_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != OWNER_ID:
+        return await callback.answer("Faqat bot egasi uchun!", show_alert=True)
+    await callback.message.answer("Hisob admini qilmoqchi bo'lgan foydalanuvchining ID raqamini yuboring:")
+    await state.set_state(AdminStates.waiting_for_payment_admin)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_payment_admin)
+async def save_pay_admin(message: types.Message, state: FSMContext):
+    try:
+        new_pay_admin = int(message.text.strip())
+        db["payment_admin"] = new_pay_admin
+        save_db()
+        await message.answer(f"✅ Yangi hisob admini tayinlandi: `{new_pay_admin}`", parse_mode="Markdown")
+    except:
+        await message.answer("❌ Noto'g'ri ID raqam.")
+    await state.clear()
+
+@dp.callback_query(F.data == "rem_pay_admin")
+async def remove_pay_admin(callback: types.CallbackQuery):
+    if callback.from_user.id != OWNER_ID:
+        return await callback.answer("Faqat bot egasi uchun!", show_alert=True)
+    db["payment_admin"] = None
+    save_db()
+    await callback.message.answer("✅ Hisob admini o'chirildi. Endi cheklar faqat sizga keladi.")
+    await callback.answer()
+
+# --- KANALLARNI BOSHQARISH ---
+@dp.callback_query(F.data == "add_channel")
+async def add_channel_start(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    if user_id not in db["admins"] and user_id != OWNER_ID:
+        return await callback.answer("Sizda bu huquq yo'q!", show_alert=True)
+    await callback.message.answer("Kanal username yoki ID raqamini yuboring (masalan: @kanal_nomi):")
+    await state.set_state(AdminStates.waiting_for_channel)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_channel)
+async def save_channel(message: types.Message, state: FSMContext):
+    channel = message.text.strip()
+    if channel not in db["channels"]:
+        db["channels"].append(channel)
+        save_db()
+        await message.answer(f"✅ Kanal qo'shildi: {channel}")
+    else:
+        await message.answer("⚠️ Bu kanal allaqachon mavjud.")
+    await state.clear()
+
+@dp.callback_query(F.data == "del_channel")
+async def del_channel_start(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    if user_id not in db["admins"] and user_id != OWNER_ID:
+        return await callback.answer("Sizda bu huquq yo'q!", show_alert=True)
+    await callback.message.answer(f"O'chirmoqchi bo'lgan kanalni yuboring (Hozirgi kanallar: {db['channels']}):")
+    await state.set_state(AdminStates.del_channel)
+    await callback.answer()
+
+@dp.message(AdminStates.del_channel)
+async def remove_channel(message: types.Message, state: FSMContext):
+    ch = message.text.strip()
+    if ch in db["channels"]:
+        db["channels"].remove(ch)
+        save_db()
+        await message.answer(f"✅ Kanal o'chirildi: {ch}")
+    else:
+        await message.answer("❌ Bunday kanal topilmadi.")
+    await state.clear()
+
+# --- ADMIN QO'SHISH / O'CHIRISH (OWNER) ---
+@dp.callback_query(F.data == "add_admin")
+async def add_admin_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != OWNER_ID:
+        return await callback.answer("Faqat bot egasi uchun!", show_alert=True)
+    await callback.message.answer("Admin qilmoqchi bo'lgan foydalanuvchining ID raqamini yuboring:")
+    await state.set_state(AdminStates.waiting_for_admin)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_admin)
+async def save_new_admin(message: types.Message, state: FSMContext):
+    try:
+        new_adm = int(message.text.strip())
+        db["admins"].add(new_adm)
+        save_db()
+        await message.answer(f"✅ Yangi admin qo'shildi: `{new_adm}`", parse_mode="Markdown")
+    except:
+        await message.answer("❌ Noto'g'ri ID raqam.")
+    await state.clear()
+
+@dp.callback_query(F.data == "del_admin")
+async def del_admin_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != OWNER_ID:
+        return await callback.answer("Faqat bot egasi uchun!", show_alert=True)
+    await callback.message.answer(f"O'chirmoqchi bo'lgan admin ID raqamini yuboring (Adminlar: {list(db['admins'])}):")
+    await state.set_state(AdminStates.del_admin)
+    await callback.answer()
+
+@dp.message(AdminStates.del_admin)
+async def remove_admin(message: types.Message, state: FSMContext):
+    try:
+        rem_adm = int(message.text.strip())
+        if rem_adm == OWNER_ID:
+            await message.answer("❌ Bot egasini o'chirib bo'lmaydi!")
+        elif rem_adm in db["admins"]:
+            db["admins"].remove(rem_adm)
+            save_db()
+            await message.answer(f"✅ Admin o'chirildi: `{rem_adm}`", parse_mode="Markdown")
+        else:
+            await message.answer("❌ Bunday admin topilmadi.")
+    except:
+        await message.answer("❌ Xato format.")
+    await state.clear()
+
+# --- CHEK KELGANDA ---
+@dp.message(F.photo | F.document)
+async def catch_payment_proof(message: types.Message):
+    user_id = message.from_user.id
+    if user_id in db["admins"] or user_id == OWNER_ID:
+        return 
+
+    caption = f"🔔 **Yangi to'lov cheki keldi!**\n👤 Foydalanuvchi: [Profil](tg://user?id={user_id})\n🆔 ID: `{user_id}`"
+    
+    try:
+        await message.send_copy(chat_id=OWNER_ID, caption=caption, parse_mode="Markdown")
+    except:
+        pass
+
+    pay_admin = db.get("payment_admin")
+    if pay_admin and pay_admin != OWNER_ID:
+        try:
+            await message.send_copy(chat_id=pay_admin, caption=caption, parse_mode="Markdown")
+        except:
+            pass
+
+    await message.answer("✅ Chekingiz qabul qilindi! Hisob admini tekshirib, balansingizni to'ldirib beradi.")
 
 # Botni ishga tushirish
+async def main():
+    await dp.start_polling(bot)
+
 if __name__ == "__main__":
-    print("Bot ishga tushdi...")
-    bot.infinity_polling()
+    asyncio.run(main())
