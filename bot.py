@@ -385,20 +385,20 @@ async def handle_join_request(request: types.ChatJoinRequest):
         return
 
     try:
-        await bot.approve_chat_join_request(
-            chat_id=chat_id,
-            user_id=user_id
-        )
-
         add_user(user_id)
-        add_log(f"✅ Join Request tasdiqlandi: {user_id} -> {chat_id}")
+        add_log(f"🔔 Join Request keldi: {user_id} -> {chat_id}")
 
         try:
             await bot.send_message(
                 user_id,
-                "✅ Kanalga obuna bo'lish so'rovingiz tasdiqlandi!\n\n"
-                "Endi botdan foydalanishingiz mumkin."
+                "🔔 Kanalga qo'shilish so'rovingiz qabul qilindi!\n\n"
+                "Tez orada adminlar tasdiqlashadi."
             )
+        except Exception:
+            pass
+    except Exception as e:
+        logging.exception(f"Join Request xatosi: {e}")
+
         except Exception:
             pass
     except Exception as e:
