@@ -2,13 +2,14 @@ import asyncio
 import os
 import json
 from datetime import datetime
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 
-# --- SOZLAMALAR ---
+# --- TOKENNI TO'G'RI KIRITING ---
 TOKEN = "8644696840:AAE1J15_4gsDcEkzDExqOARCo38V5o3Nylo"
 OWNER_ID = 7020448136 
 
@@ -20,9 +21,7 @@ DB_FILE = "database.json"
 def load_db():
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
-            try:
-                data = json.load(f)
-                return data
+            try: return json.load(f)
             except: pass
     return {"users": {}, "admins": [OWNER_ID], "payment_admin": None, "channels": [], "logs": [], "promos": {"42": [], "79": [], "99": [], "299": []}}
 
@@ -39,9 +38,8 @@ def add_log(action):
 
 # --- STATE ---
 class AdminStates(StatesGroup):
-    promo_code = State(); channel = State(); del_channel = State()
-    admin_id = State(); del_admin = State(); pay_admin = State()
     bal_id = State(); bal_amount = State()
+    pay_admin = State()
 
 # --- MENYULAR ---
 def main_kb(user_id):
@@ -54,7 +52,7 @@ def main_kb(user_id):
 @dp.message(Command("start"))
 async def start(msg: types.Message, state: FSMContext):
     await state.clear()
-    await msg.answer("Xush kelibsiz!", reply_markup=main_kb(msg.from_user.id))
+    await msg.answer("👋 Assalomu alaykum! Buldrop botiga xush kelibsiz.", reply_markup=main_kb(msg.from_user.id))
 
 @dp.message(F.text == "👑 Owner Menyu")
 async def owner_menu(msg: types.Message):
@@ -62,9 +60,7 @@ async def owner_menu(msg: types.Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Hisob adminini qo'shish", callback_data="set_pay")],
         [InlineKeyboardButton(text="❌ Hisob adminini o'chirish", callback_data="rem_pay")],
-        [InlineKeyboardButton(text="📊 Tarix (Logs)", callback_data="view_logs")],
-        [InlineKeyboardButton(text="👤 Admin qo'shish", callback_data="add_adm")],
-        [InlineKeyboardButton(text="❌ Adminni o'chirish", callback_data="del_adm")]
+        [InlineKeyboardButton(text="📊 Tarix (Logs)", callback_data="view_logs")]
     ])
     await msg.answer("👑 Owner paneli:", reply_markup=kb)
 
@@ -72,20 +68,15 @@ async def owner_menu(msg: types.Message):
 async def admin_menu(msg: types.Message):
     if msg.from_user.id not in db["admins"] and msg.from_user.id != OWNER_ID: return
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Promokod qo'shish", callback_data="add_pr")],
-        [InlineKeyboardButton(text="💰 Balansni o'zgartirish", callback_data="ch_bal")],
-        [InlineKeyboardButton(text="📢 Kanal qo'shish", callback_data="add_ch")],
-        [InlineKeyboardButton(text="🗑 Kanalni o'chirish", callback_data="del_ch")]
+        [InlineKeyboardButton(text="💰 Balansni o'zgartirish", callback_data="ch_bal")]
     ])
     await msg.answer("⚙️ Admin paneli:", reply_markup=kb)
 
-# --- TARIX KO'RISH ---
 @dp.callback_query(F.data == "view_logs")
 async def view_logs(call: types.CallbackQuery):
     logs = "\n".join(db["logs"]) if db["logs"] else "Tarix bo'sh"
     await call.message.answer(f"📊 Tarix:\n{logs}")
 
-# --- BALANSNI O'ZGARTIRISH LOGIKASI ---
 @dp.callback_query(F.data == "ch_bal")
 async def ch_bal(call: types.CallbackQuery, state: FSMContext):
     await call.message.answer("Foydalanuvchi ID:"); await state.set_state(AdminStates.bal_id)
@@ -103,7 +94,6 @@ async def set_bal(msg: types.Message, state: FSMContext):
     save_db(db); add_log(f"Admin {msg.from_user.id} {uid} ga {msg.text} qo'shdi")
     await msg.answer("✅ Balans yangilandi!"); await state.clear()
 
-# --- HISOB ADMINI LOGIKASI ---
 @dp.callback_query(F.data == "set_pay")
 async def set_pay(call: types.CallbackQuery, state: FSMContext):
     await call.message.answer("Hisob admini ID:"); await state.set_state(AdminStates.pay_admin)
@@ -113,7 +103,10 @@ async def save_pay(msg: types.Message, state: FSMContext):
     db["payment_admin"] = int(msg.text); save_db(db)
     await msg.answer("✅ Hisob admini tayinlandi!"); await state.clear()
 
-# --- CHEK QABUL QILISH ---
+@dp.callback_query(F.data == "rem_pay")
+async def rem_pay(call: types.CallbackQuery):
+    db["payment_admin"] = None; save_db(db); await call.message.answer("❌ Hisob admini o'chirildi!")
+
 @dp.message(F.photo | F.document)
 async def get_pay(msg: types.Message):
     add_log(f"User {msg.from_user.id} chek yubordi")
@@ -122,9 +115,20 @@ async def get_pay(msg: types.Message):
         try: await msg.send_copy(chat_id=db["payment_admin"])
         except: pass
 
+# --- RENDER UCHUN WEB SERVER ---
+async def handle(request): return web.Response(text="Bot is running!")
+
+async def web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080)))
+    await site.start()
+
 async def main():
+    await web_server()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
