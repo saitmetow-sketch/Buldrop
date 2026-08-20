@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import json
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -267,7 +268,7 @@ async def save_promo_codes(message: types.Message, state: FSMContext):
     await message.answer(f"✅ **{p_type}** turkumiga {added_count} ta promokod qo'shildi. (Jami zaxira: {len(db['promos'][p_type])} ta)")
     await state.clear()
 
-# --- HISOB ADMININI BOSHQARISH (FAQAT OWNER UCHUN) ---
+# --- HISOB ADMININI BOSHQARISH (OWNER) ---
 @dp.callback_query(F.data == "set_pay_admin")
 async def set_pay_admin_start(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != OWNER_ID:
@@ -404,8 +405,25 @@ async def catch_payment_proof(message: types.Message):
 
     await message.answer("✅ Chekingiz qabul qilindi! Hisob admini tekshirib, balansingizni to'ldirib beradi.")
 
-# Botni ishga tushirish
+# --- RENDER UCHUN VEB-SERVER (UYG'OQ SAQLASH) ---
+async def handle_ping(request):
+    return web.Response(text="Bot is running 24/7!")
+
+async def web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # Render avtomatik beradigan PORT o'zgaruvchisini oladi yoki 8080 ishlatadi
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+# --- BOTNI ISHGA TUSHIRISH ---
 async def main():
+    # Veb-serverni va bot polling ni bir vaqtda (parallel) ishga tushiramiz
+    await web_server()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
