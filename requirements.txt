@@ -1,2 +1,2 @@
-aiogram==3.13.1
-aiohttp
+pyTelegramBotAPI==4.14.0
+pydantic==2.5.3
