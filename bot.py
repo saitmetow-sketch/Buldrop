@@ -273,58 +273,25 @@ async def check_subscription(user_id: int):
 # =========================================================
 
 async def get_sub_keyboard():
-async def get_sub_keyboard():
     rows = []
-
-    for channel in (
-        db["sub_channels"]
-        + db["req_channels"]
-    ):
+    for channel in db["sub_channels"] + db["req_channels"]:
         try:
             chat = await bot.get_chat(channel)
-            
-            # Agar chatning username'i bo'lsa
             if chat.username:
                 url = f"https://t.me/{chat.username}"
-            # Agar chat invite link'i bo'lsa yoki private ID bo'lsa
-            elif hasattr(chat, "invite_link") and chat.invite_link:
-                url = chat.invite_link
             else:
                 url = None
-
+            
             if url:
-                rows.append([
-                    InlineKeyboardButton(
-                        text=f"📢 {chat.title}",
-                        url=url
-                    )
-                ])
+                rows.append([InlineKeyboardButton(text=f"📢 {chat.title}", url=url)])
             else:
-                rows.append([
-                    InlineKeyboardButton(
-                        text=f"📢 {chat.title}",
-                        callback_data="no_link"
-                    )
-                ])
-
+                rows.append([InlineKeyboardButton(text=f"📢 {chat.title}", callback_data="no_link")])
         except Exception:
-            rows.append([
-                InlineKeyboardButton(
-                    text=f"📢 {str(channel)}",
-                    callback_data="no_link"
-                )
-            ])
+            rows.append([InlineKeyboardButton(text=f"📢 {str(channel)}", callback_data="no_link")])
+            
+    rows.append([InlineKeyboardButton(text="✅ Obunani tekshirish", callback_data="check_sub")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    rows.append([
-        InlineKeyboardButton(
-            text="✅ Obunani tekshirish",
-            callback_data="check_sub"
-        )
-    ])
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=rows
-    )
 
 # =========================================================
 # MENYU
