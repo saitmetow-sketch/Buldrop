@@ -23,7 +23,8 @@ OWNER_ID = 7020448136
 DB_FILE = "database.json"
 
 if not TOKEN:
-    raise RuntimeError("8644696840:AAFhsRFaMsz8XrySdMV4kAVAJ4RbITaJT34)
+    raise RuntimeError("BOT_TOKEN topilmadi!")
+
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
